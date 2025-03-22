@@ -1,0 +1,30 @@
+/* Estilos para los botones */
+button { 
+    background: linear-gradient(to bottom, #4a90e2, #0056b3); /* Degradado azul */
+    border-radius: 10px; /* Bordes redondeados */
+    border: 2px solid #003d80; /* Borde azul oscuro */
+    color: white; /* Texto en color blanco */
+    font-weight: bold; /* Texto en negrita */
+    padding: 10px; /* Espaciado interno */
+    transition: background 0.3s ease-in-out; /* Transicion suave al cambiar el color de fondo */
+}
+
+/* Cambio de color cuando el cursor pasa sobre el botón */
+button:hover {
+    background: linear-gradient(to bottom, #67a8ff, #004080); /* Azul más claro en hover */
+}
+
+/* Cambio de color cuando el boton esta presionado */
+button:active {
+    background: linear-gradient(to bottom, #ff6b6b, #b30000); /* Rojo degradado cuando se presiona */
+}
+
+/* Color de fondo de la ventana principal */
+window {
+    background-color: #133578; /* Azul oscuro de fondo */
+}
+
+/* Estilos para las etiquetas de texto */
+label {
+    border-radius: 10px; /* Esquinas redondeadas en las etiquetas de texto */
+}
