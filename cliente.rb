@@ -1,189 +1,220 @@
 require "gtk3"
 require "thread"
-require "net/http"
-require "json"
-require_relative "puzzle1"   # Tu clase Rfid para NFC
-require_relative "LCDController"
+require_relative 'LCDController'
+require_relative 'puzzle1'
+require 'json'
+require 'net/http'
 
-BLUE   = Gdk::RGBA.new(0, 0, 1, 1)
-RED    = Gdk::RGBA.new(1, 0, 0, 1)
-WHITE  = Gdk::RGBA.new(1, 1, 1, 1)
-CSS    = "disseny.css"       # Tu archivo de estilos
 
-# Aplicar CSS a toda la app 
-def apply_css
-  provider = Gtk::CssProvider.new
-  provider.load(path: CSS)
-  screen = Gdk::Screen.default
-  Gtk::StyleContext.add_provider_for_screen(
-    screen, provider, Gtk::StyleProvider::PRIORITY_USER
-  )
-end
+class MainWindow < Gtk::Window
+  def initialize(lcd_controller)
+    @lcd_controller = lcd_controller
+    @window = Gtk::Window.new("course_manager.rb")
+    @window.set_default_size(500, 200) # Configurar el tamaño de la ventana
+    @thread = nil # Inicializar el hilo como nulo al principio
 
-class NFCApp
-  def initialize
-    apply_css
-    build_login_window
-    Gtk.init
-    Gtk.main
+    # Conectar la señal "destroy" para cerrar la aplicación cuando se cierra la ventana
+    @window.signal_connect("destroy") do
+      Gtk.main_quit
+      @thread.kill if @thread # Detiene la ejecución del thread
+      Gtk.main_quit
+    end
+
+    ventana_inicio # Crear el contenido de la ventana_inicio
   end
 
-  # Ventana de login NFC 
-  def build_login_window
-    @login_win = Gtk::Window.new("Login NFC")
-    @login_win.set_size_request(400, 200)
-    @login_win.signal_connect("destroy") { Gtk.main_quit }
+  def ventana_inicio
+    @lcd_controller.printCenter("Please, login with your university card") # Mostrar el mensaje inicial en la LCD
 
-    vbox = Gtk::Box.new(:vertical, 10)
-    @login_win.add(vbox)
+    @window.children.each { |widget| @window.remove(widget) } # Eliminar los widgets existentes
 
+    # Crear un marco para enmarcar el mensaje
+    @frame = Gtk::Frame.new
+    @frame.set_border_width(10)
+    @frame.override_background_color(:normal, Gdk::RGBA.new(0, 0, 1, 1)) # Color azul
+
+    # Crear un contenedor Gtk::Box dentro del marco para organizar verticalmente
+    box = Gtk::Box.new(:vertical, 5)
+    @frame.add(box)
+
+    # Mensaje antes de la autenticación
     @label = Gtk::Label.new("Please, login with your university card")
-    @label.override_background_color(:normal, BLUE)
-    @label.override_color(:normal, WHITE)
-    vbox.pack_start(@label, expand: true, fill: true, padding: 20)
+    @label.override_color(:normal, Gdk::RGBA.new(1, 1, 1, 1)) # Color blanco
+    @label.set_halign(:center) # Centrar el texto horizontalmente en la etiqueta
+    box.pack_start(@label, expand: true, fill: true, padding: 10)
 
-    # Iniciar lectura NFC en hilo
+    @window.add(@frame) # Agregar el marco a la ventana
+    @window.show_all
+
+    rfid # Poner en marcha la lectura RFID
+  end
+
+  def rfid
+   #@rfid = SimuladorNFC.new # Cambiar aqu�: de Rfid a SimuladorNFC
+    @rfid = Rfid.new # Crear una nueva instancia de la clase Rfid
+    iniciar_lectura_rfid # Iniciar lectura RFID
+  end
+
+  def iniciar_lectura_rfid
+    # Crea un thread para leer el uid
+    @thread = Thread.new do
+      @uid = @rfid.read_uid 
+
+      puts "UID leído: #{@uid}" 
+
+      GLib::Idle.add do
+        autenticacion(@uid)
+        false # Para detener la repetición de la llamada a la función
+      end
+    end
+  end
+
+  def autenticacion(uid)
+    uri = URI("http://10.192.40.80:3000/students?student_id=#{uid}")
     begin
-      @rfid = Rfid.new
-      start_read_thread { |uid| on_login(uid) }
-    rescue => e
-      @label.set_text("Error: #{e.message}")
-      @label.override_background_color(:normal, RED)
-    end
-
-    @login_win.show_all
-  end
-
-  # Tras login, montamos la ventana principal 
-  def on_login(uid)
-    # Aquí podrías consultar al servidor para validar y obtener nombre:
-    student = "UID: #{uid}"
-    Gtk::Idle.add do
-      @login_win.destroy
-      build_main_window(student)
-    end
-  end
-
-  # Ventana principal 
-  def build_main_window(student_name)
-    @main_win = Gtk::Window.new("Course Manager")
-    @main_win.set_size_request(600, 400)
-    @main_win.signal_connect("destroy") { Gtk.main_quit }
-
-    vbox = Gtk::Box.new(:vertical, 5)
-    @main_win.add(vbox)
-
-    # Bienvenida
-    welcome = Gtk::Label.new("Welcome #{student_name}")
-    vbox.pack_start(welcome, expand: false, fill: true, padding: 10)
-
-    # Entrada + Go
-    hbox = Gtk::Box.new(:horizontal, 5)
-    @entry = Gtk::Entry.new
-    @go_btn = Gtk::Button.new(label: "Go")
-    hbox.pack_start(@entry, expand: true, fill: true, padding: 0)
-    hbox.pack_start(@go_btn, expand: false, fill: false, padding: 0)
-    vbox.pack_start(hbox, expand: false, fill: true, padding: 5)
-
-    # TreeView para resultados
-    @store = Gtk::ListStore.new
-    @tree  = Gtk::TreeView.new(@store)
-    scrolled = Gtk::ScrolledWindow.new
-    scrolled.set_policy(:automatic, :automatic)
-    scrolled.add(@tree)
-    vbox.pack_start(scrolled, expand: true, fill: true, padding: 5)
-
-    # Logout
-    @logout_btn = Gtk::Button.new(label: "Logout")
-    vbox.pack_start(@logout_btn, expand: false, fill: false, padding: 10)
-
-    # Señales
-    @go_btn.signal_connect("clicked")    { perform_query }
-    @logout_btn.signal_connect("clicked") { logout }
-
-    @main_win.show_all
-    reset_inactivity_timer
-  end
-
-  # Lectura NFC en hilo, una sola vez 
-  def start_read_thread(&handler)
-    Thread.new do
-      uid = @rfid.read_uid
-      handler.call(uid) if handler
-      Thread.exit
+      response = Net::HTTP.get_response(uri)
+      if response.is_a?(Net::HTTPSuccess)
+        datos = JSON.parse(response.body)
+      else
+        puts "Error en la respuesta del servidor: #{response.code} - #{response.message}"
+        @lcd_controller.printCenter("Error de autenticación.")
+        @label.set_markup("Authentication error, please try again.")
+        @frame.override_background_color(:normal, Gdk::RGBA.new(1, 0, 0, 1)) # Color rojo
+        return
+      end
+  
+      if datos.is_a?(Hash) && datos["students"].is_a?(Array) && !datos["students"].empty?
+        student = datos["students"].first
+        @nombre = student["name"]
+        ventana_query
+        puts student["name"]
+      else
+        @lcd_controller.printCenter("Authentication error, please try again.")
+        @label.set_markup("Authentication error, please try again.")
+        @frame.override_background_color(:normal, Gdk::RGBA.new(1, 0, 0, 1)) # Color rojo
+        puts "Error: datos vacíos o sin estudiantes."
+      end
+    rescue JSON::ParserError => e
+      puts "Error al parsear el JSON: #{e.message}"
+    rescue StandardError => e
+      puts "Error al conectar con el servidor: #{e.message}"
     end
   end
+  
 
-  # Enviar consulta HTTP y poblar tabla 
-  def perform_query
-    reset_inactivity_timer
-    query = @entry.text.strip
-    Thread.new do
-      begin
-        data = fetch_data(query)
-        GLib::Idle.add { populate_tree(data) }
-      rescue => e
-        GLib::Idle.add { show_error("Error: #{e.message}") }
+  def ventana_query
+    iniciar_timeout # Empezar timeout
+    ip = '10.192.40.80'
+    @frame.destroy # Eliminar los widgets existentes de la ventana anterior
+    @lcd_controller.printCenter("Welcome \n #{@nombre}") # Mostrar el mensaje en la LCD
+
+    # Crear estructura de la ventana
+    @table = Gtk::Table.new(2, 2, true)
+    @table.set_column_spacing(300)
+    @table.set_row_spacings(10)
+
+    @nombre = Gtk::Label.new("Welcome \n #{@nombre}")
+    @query_entry = Gtk::Entry.new
+    @query_entry.set_placeholder_text("Ingrese query (timetables, tasks, marks)")
+
+    @button = Gtk::Button.new(label: 'logout')
+    @button.set_size_request(50, 50)
+    @button.signal_connect('clicked') do
+      ventana_inicio
+      detener_timeout
+    end
+
+    # Colocar los widgets en la tabla
+    @table.attach(@nombre, 0, 1, 0, 1, Gtk::AttachOptions::SHRINK, Gtk::AttachOptions::SHRINK, 10, 10)
+    @table.attach(@button, 1, 2, 0, 1, Gtk::AttachOptions::SHRINK, Gtk::AttachOptions::SHRINK, 10, 10)
+    @table.attach(@query_entry, 0, 2, 1, 2, Gtk::AttachOptions::FILL, Gtk::AttachOptions::EXPAND, 10, 10)
+
+    # Manejar el evento 'activate' (presionar Enter)
+    @query_entry.signal_connect("activate") do
+      detener_timeout
+      iniciar_timeout
+      query = @query_entry.text.strip
+      url = "http://%s:9000/" % ip + query
+      mostrar_datos_json(url)
+      @query_entry.text = "" # Limpiar el campo de entrada después de la consulta
+    end
+
+    @window.add(@table)
+    @window.show_all
+  end
+
+  def mostrar_datos_json(url)
+    # Obtener los datos JSON desde la URL
+    uri = URI(url)
+    json_content = Net::HTTP.get(uri)
+    datos = JSON.parse(json_content)
+
+    # Tratamiento de errores
+    if datos["error"]
+      puts "Consulta no valida"
+      return
+    end
+
+    # Obtener el título y la lista de resultados
+    titulo = datos.keys.first
+    if datos[titulo].empty?
+      puts "Query vacia"
+      return
+    end
+
+    headers = datos[titulo][0].keys
+    headers.pop # Eliminar el último elemento que no necesitamos mostrar
+    lista = datos[titulo] # Obtener la lista correspondiente
+
+    # Crear la ventana para mostrar los datos
+    @tabla = Gtk::Window.new
+    @tabla.set_title(titulo)
+    @tabla.set_default_size(400, 300)
+
+    grid = Gtk::Grid.new
+    grid.set_row_spacing(5)
+    grid.set_column_spacing(5)
+    @tabla.add(grid)
+
+    # Encabezados de la tabla
+    headers.each_with_index do |encabezado, index|
+      header_label = Gtk::Label.new(encabezado)
+      header_label.override_background_color(:normal, Gdk::RGBA.new(0.95, 0.95, 0.5, 1.0)) # amarillo
+      grid.attach(header_label, index, 0, 1, 1)
+      header_label.hexpand = true
+    end
+
+    # Mostrar los datos
+    lista.each_with_index do |item, row_index|
+      item.each_with_index do |(key, value), column_index|
+        next if column_index == item.size - 1
+        tarea_label = Gtk::Label.new(value.to_s)
+        grid.attach(tarea_label, column_index, row_index + 1, 1, 1)
+        tarea_label.hexpand = true
+        if row_index % 2 == 0
+          tarea_label.override_background_color(:normal, Gdk::RGBA.new(0.7, 0.7, 1.0, 1.0)) # Azul claro
+        else
+          tarea_label.override_background_color(:normal, Gdk::RGBA.new(0.5, 0.5, 1.0, 1.0)) # Azul
+        end
       end
     end
+    @tabla.show_all # Mostrar todo
   end
 
-  def fetch_data(path)
-    uri = URI("http://SERVIDOR/#{path}")
-    res = Net::HTTP.get_response(uri)
-    raise "HTTP #{res.code}" unless res.is_a?(Net::HTTPSuccess)
-    JSON.parse(res.body)  # Espera Array de Hashes
-  end
-
-  #  Crear columnas y filas dinámicamente 
-  def populate_tree(arr)
-    @store.clear
-    return if arr.empty?
-
-    # Primera vez: columnas
-    if @tree.columns.empty?
-      keys  = arr.first.keys
-      types = arr.first.values.map{ String }  # todo a String
-      @store = Gtk::ListStore.new(*types)
-      @tree.model = @store
-      keys.each_with_index do |k,i|
-        r = Gtk::CellRendererText.new
-        c = Gtk::TreeViewColumn.new(k.capitalize, r, text: i)
-        @tree.append_column(c)
-      end
-    end
-
-    # Filas
-    arr.each do |row|
-      iter = @store.append
-      row.values.each_with_index { |v,i| iter[i] = v.to_s }
+  def iniciar_timeout
+    @timeout_id = GLib::Timeout.add_seconds(120) do
+      puts "Se han superado los 15 segundos."
+      ventana_inicio
+      @tabla.hide
+      false # Para que el temporizador no se repita
     end
   end
 
-  #  Dialogo de error 
-  def show_error(msg)
-    dlg = Gtk::MessageDialog.new(
-      parent: @main_win,
-      flags:   :modal,
-      type:    :error,
-      buttons: :close,
-      message: msg
-    )
-    dlg.run; dlg.destroy
-  end
-
-  #  Inactividad 
-  def reset_inactivity_timer
-    GLib::Source.remove(@timer) if @timer
-    @timer = GLib::Timeout.add(2*60*1000) { logout; false }
-  end
-
-  #  Logout  volver a login NFC 
-  def logout
-    @main_win.destroy
-    build_login_window
+  def detener_timeout
+    GLib::Source.remove(@timeout_id) if @timeout_id
   end
 end
 
-# Arranque de la app 
-NFCApp.new
+lcd_controller = LCDController.new # Crear una instancia de LCDController
+MainWindow.new(lcd_controller) # Ejecutar la aplicación
+Gtk.main
