@@ -1,142 +1,140 @@
 require "gtk3"
 require "thread"
-require_relative 'LCDController'
-require_relative 'puzzle1'
-require 'json'
-require 'net/http'
+require_relative "LCDController"
+require_relative "puzzle1"
+require "json"
+require "net/http"
 
+def apply_css
+  css_provider = Gtk::CssProvider.new
+  css_provider.load(path: "disseny.css") # Carga el archivo CSS con los estilos personalizados
 
-class MainWindow < Gtk::Window
+  style_context = Gtk::StyleContext
+  screen = Gdk::Screen.default
+
+  # Aplica el CSS a toda la pantalla
+  style_context.add_provider_for_screen(screen, css_provider, Gtk::StyleProvider::PRIORITY_USER)
+end
+
+class MainWindow
+  TIMEOUT_SECONDS = 120
+
   def initialize(lcd_controller)
+    apply_css
     @lcd_controller = lcd_controller
+    @thread = nil
+
     @window = Gtk::Window.new("course_manager.rb")
-    @window.set_default_size(500, 200) # Configurar el tamaño de la ventana
-    @thread = nil # Inicializar el hilo como nulo al principio
+    @window.set_default_size(500, 200)
+    @window.signal_connect("destroy") { cleanup_and_quit }
 
-    # Conectar la señal "destroy" para cerrar la aplicación cuando se cierra la ventana
-    @window.signal_connect("destroy") do
-      Gtk.main_quit
-      @thread.kill if @thread # Detiene la ejecución del thread
-      Gtk.main_quit
-    end
+    ventana_inicio
+    Gtk.main
+  end
 
-    ventana_inicio # Crear el contenido de la ventana_inicio
+  def cleanup_and_quit
+    @thread&.kill
+    Gtk.main_quit
   end
 
   def ventana_inicio
-    @lcd_controller.printCenter("Please, login with your university card") # Mostrar el mensaje inicial en la LCD
+    @lcd_controller.printCenter("Please,\nlogin with\nyour card")
 
-    @window.children.each { |widget| @window.remove(widget) } # Eliminar los widgets existentes
+    @window.each { |w| @window.remove(w) }
 
-    # Crear un marco para enmarcar el mensaje
     @frame = Gtk::Frame.new
     @frame.set_border_width(10)
-    @frame.override_background_color(:normal, Gdk::RGBA.new(0, 0, 1, 1)) # Color azul
+    @frame.override_background_color(:normal, Gdk::RGBA.new(0, 0, 1, 1))
 
-    # Crear un contenedor Gtk::Box dentro del marco para organizar verticalmente
     box = Gtk::Box.new(:vertical, 5)
     @frame.add(box)
 
-    # Mensaje antes de la autenticación
     @label = Gtk::Label.new("Please, login with your university card")
-    @label.override_color(:normal, Gdk::RGBA.new(1, 1, 1, 1)) # Color blanco
-    @label.set_halign(:center) # Centrar el texto horizontalmente en la etiqueta
+    @label.override_color(:normal, Gdk::RGBA.new(1, 1, 1, 1))
+    @label.set_halign(:center)
     box.pack_start(@label, expand: true, fill: true, padding: 10)
 
-    @window.add(@frame) # Agregar el marco a la ventana
+    @window.add(@frame)
     @window.show_all
 
-    rfid # Poner en marcha la lectura RFID
+    iniciar_rfid
   end
 
-  def rfid
-   #@rfid = SimuladorNFC.new # Cambiar aqu�: de Rfid a SimuladorNFC
-    @rfid = Rfid.new # Crear una nueva instancia de la clase Rfid
-    iniciar_lectura_rfid # Iniciar lectura RFID
-  end
-
-  def iniciar_lectura_rfid
-    # Crea un thread para leer el uid
+  def iniciar_rfid
+    @rfid = Rfid.new
     @thread = Thread.new do
-      @uid = @rfid.read_uid 
-
-      puts "UID leído: #{@uid}" 
-
+      uid = @rfid.read_uid
+      puts "UID leído: #{uid}"
       GLib::Idle.add do
-        autenticacion(@uid)
-        false # Para detener la repetición de la llamada a la función
+        autenticacion(uid)
+        false
       end
     end
+  rescue StandardError => e
+    @label.set_text("Reader error: #{e.message}")
+    @frame.override_background_color(:normal, Gdk::RGBA.new(1, 0, 0, 1))
+    @lcd_controller.printCenter("Reader\nerror")
   end
 
   def autenticacion(uid)
     uri = URI("http://10.192.40.80:3000/students?student_id=#{uid}")
-    begin
-      response = Net::HTTP.get_response(uri)
-      if response.is_a?(Net::HTTPSuccess)
-        datos = JSON.parse(response.body)
-      else
-        puts "Error en la respuesta del servidor: #{response.code} - #{response.message}"
-        @lcd_controller.printCenter("Error de autenticación.")
-        @label.set_markup("Authentication error, please try again.")
-        @frame.override_background_color(:normal, Gdk::RGBA.new(1, 0, 0, 1)) # Color rojo
-        return
-      end
-  
-      if datos.is_a?(Hash) && datos["students"].is_a?(Array) && !datos["students"].empty?
-        student = datos["students"].first
-        @nombre = student["name"]
-        ventana_query
-        puts student["name"]
-      else
-        @lcd_controller.printCenter("Authentication error, please try again.")
-        @label.set_markup("Authentication error, please try again.")
-        @frame.override_background_color(:normal, Gdk::RGBA.new(1, 0, 0, 1)) # Color rojo
-        puts "Error: datos vacíos o sin estudiantes."
-      end
-    rescue JSON::ParserError => e
-      puts "Error al parsear el JSON: #{e.message}"
-    rescue StandardError => e
-      puts "Error al conectar con el servidor: #{e.message}"
+    response = Net::HTTP.get_response(uri)
+
+    unless response.is_a?(Net::HTTPSuccess)
+      autent_fail; return
     end
+
+    datos = JSON.parse(response.body)
+    students = datos["students"] rescue nil
+
+    if students.is_a?(Array) && !students.empty?
+      @nombre = students.first["name"]
+      ventana_query
+    else
+      autent_fail
+    end
+  rescue StandardError => e
+    puts "Auth error: #{e.message}"
+    autent_fail
   end
-  
+
+  def autent_fail
+    @lcd_controller.printCenter("Authentication\nerror")
+    @label.set_markup("Authentication error,\nplease try again.")
+    @frame.override_background_color(:normal, Gdk::RGBA.new(1, 0, 0, 1))
+  end
 
   def ventana_query
-    iniciar_timeout # Empezar timeout
-    ip = '10.192.40.80'
-    @frame.destroy # Eliminar los widgets existentes de la ventana anterior
-    @lcd_controller.printCenter("Welcome \n #{@nombre}") # Mostrar el mensaje en la LCD
+    iniciar_timeout
+    @frame.destroy
+    @lcd_controller.printCenter("Welcome\n#{@nombre}")
 
-    # Crear estructura de la ventana
     @table = Gtk::Table.new(2, 2, true)
     @table.set_column_spacing(300)
     @table.set_row_spacings(10)
 
-    @nombre = Gtk::Label.new("Welcome \n #{@nombre}")
-    @query_entry = Gtk::Entry.new
-    @query_entry.set_placeholder_text("Ingrese query (timetables, tasks, marks)")
+    lbl_name = Gtk::Label.new("Welcome\n#{@nombre}")
+    lbl_name.set_halign(:start)
 
-    @button = Gtk::Button.new(label: 'logout')
-    @button.set_size_request(50, 50)
-    @button.signal_connect('clicked') do
-      ventana_inicio
+    @query_entry = Gtk::Entry.new
+    @query_entry.set_placeholder_text("timetables, tasks, marks")
+
+    btn_logout = Gtk::Button.new(label: "Logout")
+    btn_logout.signal_connect("clicked") do
       detener_timeout
+      ventana_inicio
     end
 
-    # Colocar los widgets en la tabla
-    @table.attach(@nombre, 0, 1, 0, 1, Gtk::AttachOptions::SHRINK, Gtk::AttachOptions::SHRINK, 10, 10)
-    @table.attach(@button, 1, 2, 0, 1, Gtk::AttachOptions::SHRINK, Gtk::AttachOptions::SHRINK, 10, 10)
-    @table.attach(@query_entry, 0, 2, 1, 2, Gtk::AttachOptions::FILL, Gtk::AttachOptions::EXPAND, 10, 10)
+    @table.attach(lbl_name, 0, 1, 0, 1, :SHRINK, :SHRINK, 10, 10)
+    @table.attach(btn_logout, 1, 2, 0, 1, :SHRINK, :SHRINK, 10, 10)
+    @table.attach(@query_entry, 0, 2, 1, 2, :FILL, :EXPAND, 10, 10)
 
-    # Manejar el evento 'activate' (presionar Enter)
     @query_entry.signal_connect("activate") do
       detener_timeout
       iniciar_timeout
-      query = @query_entry.text.strip
-      url = "http://%s:9000/" % ip + query
+      url = "http://10.192.40.80:3000/#{@query_entry.text.strip}"
       mostrar_datos_json(url)
-      @query_entry.text = "" # Limpiar el campo de entrada después de la consulta
+      @query_entry.text = ""
     end
 
     @window.add(@table)
@@ -144,29 +142,15 @@ class MainWindow < Gtk::Window
   end
 
   def mostrar_datos_json(url)
-    # Obtener los datos JSON desde la URL
-    uri = URI(url)
-    json_content = Net::HTTP.get(uri)
-    datos = JSON.parse(json_content)
+    datos = JSON.parse(Net::HTTP.get(URI(url))) rescue nil
+    return puts("Consulta no valida") if datos.nil? || datos["error"]
 
-    # Tratamiento de errores
-    if datos["error"]
-      puts "Consulta no valida"
-      return
-    end
-
-    # Obtener el título y la lista de resultados
     titulo = datos.keys.first
-    if datos[titulo].empty?
-      puts "Query vacia"
-      return
-    end
+    lista  = datos[titulo]
+    return puts("Query vacía") if lista.nil? || lista.empty?
 
-    headers = datos[titulo][0].keys
-    headers.pop # Eliminar el último elemento que no necesitamos mostrar
-    lista = datos[titulo] # Obtener la lista correspondiente
+    headers = lista.first.keys[0..-2]
 
-    # Crear la ventana para mostrar los datos
     @tabla = Gtk::Window.new
     @tabla.set_title(titulo)
     @tabla.set_default_size(400, 300)
@@ -176,37 +160,30 @@ class MainWindow < Gtk::Window
     grid.set_column_spacing(5)
     @tabla.add(grid)
 
-    # Encabezados de la tabla
-    headers.each_with_index do |encabezado, index|
-      header_label = Gtk::Label.new(encabezado)
-      header_label.override_background_color(:normal, Gdk::RGBA.new(0.95, 0.95, 0.5, 1.0)) # amarillo
-      grid.attach(header_label, index, 0, 1, 1)
-      header_label.hexpand = true
+    headers.each_with_index do |h, i|
+      header = Gtk::Label.new(h)
+      header.override_background_color(:normal, Gdk::RGBA.new(0.95, 0.95, 0.5, 1.0))
+      grid.attach(header, i, 0, 1, 1)
     end
 
-    # Mostrar los datos
-    lista.each_with_index do |item, row_index|
-      item.each_with_index do |(key, value), column_index|
-        next if column_index == item.size - 1
-        tarea_label = Gtk::Label.new(value.to_s)
-        grid.attach(tarea_label, column_index, row_index + 1, 1, 1)
-        tarea_label.hexpand = true
-        if row_index % 2 == 0
-          tarea_label.override_background_color(:normal, Gdk::RGBA.new(0.7, 0.7, 1.0, 1.0)) # Azul claro
-        else
-          tarea_label.override_background_color(:normal, Gdk::RGBA.new(0.5, 0.5, 1.0, 1.0)) # Azul
-        end
+    lista.each_with_index do |item, r|
+      item.values[0..-2].each_with_index do |v, c|
+        cell = Gtk::Label.new(v.to_s)
+        color = r.even? ? Gdk::RGBA.new(0.7, 0.7, 1, 1) : Gdk::RGBA.new(0.5, 0.5, 1, 1)
+        cell.override_background_color(:normal, color)
+        grid.attach(cell, c, r + 1, 1, 1)
       end
     end
-    @tabla.show_all # Mostrar todo
+
+    @tabla.show_all
   end
 
   def iniciar_timeout
-    @timeout_id = GLib::Timeout.add_seconds(120) do
-      puts "Se han superado los 15 segundos."
+    @timeout_id = GLib::Timeout.add_seconds(TIMEOUT_SECONDS) do
+      puts "Timeout: volviendo al login"
       ventana_inicio
-      @tabla.hide
-      false # Para que el temporizador no se repita
+      @tabla&.hide
+      false
     end
   end
 
@@ -215,6 +192,6 @@ class MainWindow < Gtk::Window
   end
 end
 
-lcd_controller = LCDController.new # Crear una instancia de LCDController
-MainWindow.new(lcd_controller) # Ejecutar la aplicación
-Gtk.main
+# Arranque
+lcd = LCDController.new
+MainWindow.new(lcd)
