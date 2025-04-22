@@ -5,191 +5,234 @@ require_relative "puzzle1"
 require "json"
 require "net/http"
 
+CSS_FILE       = "disseny.css"
+LOGIN_MESSAGE  = "Please,\nlogin with\nyour card"
+AUTH_ERROR_MSG = "Authentication\nerror"
+API_BASE       = "http://10.192.40.80:3000"
+TIMEOUT_SEC    = 120
+
 def apply_css
-  css_provider = Gtk::CssProvider.new
-  css_provider.load(path: "disseny.css") # Carga el archivo CSS con los estilos personalizados
-
-  style_context = Gtk::StyleContext
-  screen = Gdk::Screen.default
-
-  # Aplica el CSS a toda la pantalla
-  style_context.add_provider_for_screen(screen, css_provider, Gtk::StyleProvider::PRIORITY_USER)
+  provider = Gtk::CssProvider.new
+  provider.load(path: CSS_FILE)
+  Gtk::StyleContext.add_provider_for_screen(
+    Gdk::Screen.default,
+    provider,
+    Gtk::StyleProvider::PRIORITY_USER
+  )
 end
 
 class MainWindow
-  TIMEOUT_SECONDS = 120
-
-  def initialize(lcd_controller)
+  def initialize(lcd)
     apply_css
-    @lcd_controller = lcd_controller
-    @thread = nil
+    @lcd = lcd
+    @rfid_thread = nil
+    @timeout_id  = nil
 
-    @window = Gtk::Window.new("course_manager.rb")
+    @window = Gtk::Window.new("Course Manager")
     @window.set_default_size(500, 200)
     @window.signal_connect("destroy") { cleanup_and_quit }
 
-    ventana_inicio
+    show_login
     Gtk.main
   end
 
+  private
+
   def cleanup_and_quit
-    @thread&.kill
+    @rfid_thread&.kill
     Gtk.main_quit
   end
 
-  def ventana_inicio
-    @lcd_controller.printCenter("Please,\nlogin with\nyour card")
+  def clear_window
+    @window.children.each { |w| @window.remove(w) }
+  end
 
-    @window.each { |w| @window.remove(w) }
+  # — Login screen —
+  def show_login
+    clear_window
+    @lcd.printCenter(LOGIN_MESSAGE)
 
     @frame = Gtk::Frame.new
     @frame.set_border_width(10)
-    @frame.override_background_color(:normal, Gdk::RGBA.new(0, 0, 1, 1))
+    @frame.override_background_color(:normal, blue)
 
-    box = Gtk::Box.new(:vertical, 5)
-    @frame.add(box)
+    vbox = Gtk::Box.new(:vertical, 5)
+    @frame.add(vbox)
 
+    # Aquí creamos directamente el label sin build_label
     @label = Gtk::Label.new("Please, login with your university card")
-    @label.override_color(:normal, Gdk::RGBA.new(1, 1, 1, 1))
+    @label.override_color(:normal, white)
     @label.set_halign(:center)
-    box.pack_start(@label, expand: true, fill: true, padding: 10)
+    vbox.pack_start(@label, expand: true, fill: true, padding: 10)
 
     @window.add(@frame)
     @window.show_all
 
-    iniciar_rfid
+    start_rfid_read
   end
 
-  def iniciar_rfid
-    @rfid = Rfid.new
-    @thread = Thread.new do
-      uid = @rfid.read_uid
-      puts "UID leído: #{uid}"
-      GLib::Idle.add do
-        autenticacion(uid)
-        false
+  def start_rfid_read
+    @rfid_thread&.kill
+    @rfid_thread = Thread.new do
+      begin
+        rfid = Rfid.new
+        uid  = rfid.read_uid
+        puts "UID leído: #{uid}"
+        GLib::Idle.add { authenticate(uid); false }
+      rescue => e
+        GLib::Idle.add { show_reader_error(e.message); false }
       end
     end
-  rescue StandardError => e
-    @label.set_text("Reader error: #{e.message}")
-    @frame.override_background_color(:normal, Gdk::RGBA.new(1, 0, 0, 1))
-    @lcd_controller.printCenter("Reader\nerror")
   end
 
-  def autenticacion(uid)
-    uri = URI("http://10.192.40.80:3000/students?student_id=#{uid}")
-    response = Net::HTTP.get_response(uri)
+  def show_reader_error(msg)
+    @label.text = "Reader error: #{msg}"
+    @frame.override_background_color(:normal, red)
+    @lcd.printCenter("Reader\nerror")
+  end
 
-    unless response.is_a?(Net::HTTPSuccess)
-      autent_fail; return
-    end
-
-    datos = JSON.parse(response.body)
-    students = datos["students"] rescue nil
-
-    if students.is_a?(Array) && !students.empty?
-      @nombre = students.first["name"]
-      ventana_query
+  # — Authentication —
+  def authenticate(uid)
+    response = Net::HTTP.get_response(URI("#{API_BASE}/students?student_id=#{uid}"))
+    if response.is_a?(Net::HTTPSuccess)
+      data = JSON.parse(response.body) rescue {}
+      students = data["students"]
+      if students.is_a?(Array) && !students.empty?
+        @student_name = students.first["name"]
+        show_query_screen
+      else
+        show_auth_error
+      end
     else
-      autent_fail
+      show_auth_error
     end
-  rescue StandardError => e
-    puts "Auth error: #{e.message}"
-    autent_fail
+  rescue
+    show_auth_error
   end
 
-  def autent_fail
-    @lcd_controller.printCenter("Authentication\nerror")
-    @label.set_markup("Authentication error,\nplease try again.")
-    @frame.override_background_color(:normal, Gdk::RGBA.new(1, 0, 0, 1))
+  def show_auth_error
+    @label.text = "Authentication error, please try again."
+    @frame.override_background_color(:normal, red)
+    @lcd.printCenter(AUTH_ERROR_MSG)
   end
 
-  def ventana_query
-    iniciar_timeout
-    @frame.destroy
-    @lcd_controller.printCenter("Welcome\n#{@nombre}")
+  # — Query screen —
+  def show_query_screen
+    clear_timeout
+    clear_window
+    @frame&.destroy
+    @lcd.printCenter("Welcome\n#{@student_name}")
 
-    @table = Gtk::Table.new(2, 2, true)
-    @table.set_column_spacing(300)
-    @table.set_row_spacings(10)
+    vbox = Gtk::Box.new(:vertical, 5)
+    @window.add(vbox)
 
-    lbl_name = Gtk::Label.new("Welcome\n#{@nombre}")
-    lbl_name.set_halign(:start)
+    welcome_label = Gtk::Label.new("Welcome #{@student_name}")
+    welcome_label.override_color(:normal, white)
+    welcome_label.set_halign(:start)
+    vbox.pack_start(welcome_label, expand: false, fill: true, padding: 10)
 
-    @query_entry = Gtk::Entry.new
-    @query_entry.set_placeholder_text("timetables, tasks, marks")
+    # Entry + Go
+    hbox = Gtk::Box.new(:horizontal, 5)
+    @entry  = Gtk::Entry.new.tap { |e| e.set_placeholder_text("timetables, tasks, marks") }
+    @go_btn = Gtk::Button.new(label: "Go")
+    @go_btn.signal_connect("clicked") { perform_query }
+    hbox.pack_start(@entry, expand: true, fill: true, padding: 0)
+    hbox.pack_start(@go_btn, expand: false, fill: false, padding: 0)
+    vbox.pack_start(hbox, expand: false, fill: true, padding: 5)
 
+    # Results TreeView
+    @store = Gtk::ListStore.new
+    @tree  = Gtk::TreeView.new(@store)
+    scrolled = Gtk::ScrolledWindow.new
+    scrolled.set_policy(:automatic, :automatic)
+    scrolled.add(@tree)
+    vbox.pack_start(scrolled, expand: true, fill: true, padding: 5)
+
+    # Logout
     btn_logout = Gtk::Button.new(label: "Logout")
     btn_logout.signal_connect("clicked") do
-      detener_timeout
-      ventana_inicio
+      clear_timeout
+      show_login
     end
+    vbox.pack_start(btn_logout, expand: false, fill: false, padding: 10)
 
-    @table.attach(lbl_name, 0, 1, 0, 1, :SHRINK, :SHRINK, 10, 10)
-    @table.attach(btn_logout, 1, 2, 0, 1, :SHRINK, :SHRINK, 10, 10)
-    @table.attach(@query_entry, 0, 2, 1, 2, :FILL, :EXPAND, 10, 10)
-
-    @query_entry.signal_connect("activate") do
-      detener_timeout
-      iniciar_timeout
-      url = "http://10.192.40.80:3000/#{@query_entry.text.strip}"
-      mostrar_datos_json(url)
-      @query_entry.text = ""
-    end
-
-    @window.add(@table)
     @window.show_all
+    start_timeout
   end
 
-  def mostrar_datos_json(url)
-    datos = JSON.parse(Net::HTTP.get(URI(url))) rescue nil
-    return puts("Consulta no valida") if datos.nil? || datos["error"]
-
-    titulo = datos.keys.first
-    lista  = datos[titulo]
-    return puts("Query vacía") if lista.nil? || lista.empty?
-
-    headers = lista.first.keys[0..-2]
-
-    @tabla = Gtk::Window.new
-    @tabla.set_title(titulo)
-    @tabla.set_default_size(400, 300)
-
-    grid = Gtk::Grid.new
-    grid.set_row_spacing(5)
-    grid.set_column_spacing(5)
-    @tabla.add(grid)
-
-    headers.each_with_index do |h, i|
-      header = Gtk::Label.new(h)
-      header.override_background_color(:normal, Gdk::RGBA.new(0.95, 0.95, 0.5, 1.0))
-      grid.attach(header, i, 0, 1, 1)
+  def perform_query
+    reset_timeout
+    query = @entry.text.strip
+    Thread.new do
+      begin
+        data = fetch_data(query)
+        GLib::Idle.add { populate_tree(data); false }
+      rescue => e
+        GLib::Idle.add { show_error("Error: #{e.message}"); false }
+      end
     end
+  end
 
-    lista.each_with_index do |item, r|
-      item.values[0..-2].each_with_index do |v, c|
-        cell = Gtk::Label.new(v.to_s)
-        color = r.even? ? Gdk::RGBA.new(0.7, 0.7, 1, 1) : Gdk::RGBA.new(0.5, 0.5, 1, 1)
-        cell.override_background_color(:normal, color)
-        grid.attach(cell, c, r + 1, 1, 1)
+  def fetch_data(path)
+    uri = URI("#{API_BASE}/#{path}")
+    res = Net::HTTP.get_response(uri)
+    raise "HTTP #{res.code}" unless res.is_a?(Net::HTTPSuccess)
+    JSON.parse(res.body)
+  end
+
+  def populate_tree(arr)
+    @store.clear
+    return if arr.empty?
+
+    if @tree.columns.empty?
+      keys = arr.first.keys
+      @store = Gtk::ListStore.new(*Array.new(keys.size, String))
+      @tree.model = @store
+      keys.each_with_index do |k, i|
+        col = Gtk::TreeViewColumn.new(k.capitalize, Gtk::CellRendererText.new, text: i)
+        @tree.append_column(col)
       end
     end
 
-    @tabla.show_all
+    arr.each do |row|
+      iter = @store.append
+      row.values.each_with_index { |v, i| iter[i] = v.to_s }
+    end
   end
 
-  def iniciar_timeout
-    @timeout_id = GLib::Timeout.add_seconds(TIMEOUT_SECONDS) do
-      puts "Timeout: volviendo al login"
-      ventana_inicio
-      @tabla&.hide
+  def show_error(msg)
+    dlg = Gtk::MessageDialog.new(
+      parent: @window,
+      flags:   :modal,
+      type:    :error,
+      buttons: :close,
+      message: msg
+    )
+    dlg.run
+    dlg.destroy
+  end
+
+  # — Timeout management —
+  def start_timeout
+    @timeout_id = GLib::Timeout.add_seconds(TIMEOUT_SEC) do
+      show_login
       false
     end
   end
 
-  def detener_timeout
+  def reset_timeout
+    clear_timeout
+    start_timeout
+  end
+
+  def clear_timeout
     GLib::Source.remove(@timeout_id) if @timeout_id
   end
+
+  # — Color helpers —
+  def blue()  = Gdk::RGBA.new(0, 0, 1, 1)
+  def red()   = Gdk::RGBA.new(1, 0, 0, 1)
+  def white() = Gdk::RGBA.new(1, 1, 1, 1)
 end
 
 # Arranque
